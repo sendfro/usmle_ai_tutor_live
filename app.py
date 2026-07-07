@@ -1,3 +1,4 @@
+
 import streamlit as st
 import json
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -87,11 +88,15 @@ if st.session_state.initial_answer:
     if not st.session_state.justification_provided:
         with st.spinner("Consulting vector database & verifying facts..."):
             
-            # Retrieve the medical facts from the 229MB database
+            # Retrieve the medical facts, pulling a wider net (k=10)
             search_results = vector_db.similarity_search(clinical_presentation, k=10)
             context = "\n\n".join([doc.page_content for doc in search_results])
             
-            # BULLETPROOF PYTHON GRADING (Bypassing AI logic)
+            # --- THE DIAGNOSTIC GAUGE ---
+            with st.expander("🔍 Diagnostic: View Retrieved Textbook Context"):
+                st.write(context if context else "DATABASE RETURNED NOTHING. LFS ISSUE DETECTED.")
+            
+            # BULLETPROOF PYTHON GRADING
             user_ans = st.session_state.initial_answer.strip()
             correct_ans = st.session_state.current_question["correct_answer"].strip()
             
@@ -101,7 +106,7 @@ if st.session_state.initial_answer:
             else:
                 grade_header = f"❌ Incorrect. The correct answer is {correct_ans}."
             
-            # THE SOCRATIC PROMPT (Titanium Guardrails Installed)
+            # --- THE HYBRID TUTOR PROMPT ---
             prompt = f"""
             You are an expert medical board examiner tutoring a student. 
             
@@ -109,22 +114,21 @@ if st.session_state.initial_answer:
             They selected: '{user_ans}'.
             The actual correct answer is: '{correct_ans}'.
             
-            Using ONLY the retrieved medical textbook context below, provide a Socratic explanation of WHY the correct answer is right, and why the student's choice (if they were wrong) is incorrect.
+            Using the retrieved medical textbook context below, provide a Socratic explanation of WHY the correct answer is right.
             
             Retrieved Textbook Context:
             {context} 
 
             CRITICAL GUARDRAILS:
-            1. You must base your reasoning EXCLUSIVELY on the textbook context provided above.
-            2. DO NOT use outside knowledge, extrapolate, deduce, or guess.
-            3. Do not re-state whether the student is correct or incorrect, just provide the medical reasoning.
-            4. If the retrieved context does not explicitly contain the clinical mechanics to explain the answer, you must strictly reply with: 'I cannot evaluate this. The retrieved context does not contain the necessary information.' Do not attempt to answer it yourself.
+            1. Try to base your reasoning on the textbook context provided.
+            2. Do not re-state whether the student is correct or incorrect.
+            3. If the retrieved context does not contain the necessary information to explain the disease mechanics, you may use your internal expert medical knowledge, but you MUST start your explanation with exactly this warning: '**[⚠️ Explaining from general clinical knowledge; textbook context was insufficient]**'
             """
             
             # Fire the zero-temperature engine
             actual_response = evaluator_llm.invoke(prompt)
             
-            # Display the hardcoded grade AND the AI's strictly-bounded reasoning
+            # Display the hardcoded grade AND the AI's reasoning
             st.markdown(f"### {grade_header}")
             st.info(f"**Socratic Evaluation:**\n\n{actual_response.content}")
             
