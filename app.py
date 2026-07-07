@@ -88,7 +88,7 @@ if st.session_state.initial_answer:
         with st.spinner("Consulting vector database & verifying facts..."):
             
             # Retrieve the medical facts from the 229MB database
-            search_results = vector_db.similarity_search(clinical_presentation, k=3)
+            search_results = vector_db.similarity_search(clinical_presentation, k=10)
             context = "\n\n".join([doc.page_content for doc in search_results])
             
             # BULLETPROOF PYTHON GRADING (Bypassing AI logic)
