@@ -1,11 +1,37 @@
 import streamlit as st
 import json
-import random
-from langchain_community.vectorstores import Chroma
-# CHANGED: We now import OpenAIEmbeddings instead of Ollama
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
 
-# --- 1. SESSION STATE INITIALIZATION ---
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(page_title="The Interrogation Engine", layout="wide")
+
+# --- 2. DUAL-ENGINE INITIALIZATION ---
+@st.cache_resource
+def load_engine():
+    # ENGINE A: The STRICT Grader (Zero Creativity Lock)
+    evaluator_llm = ChatOpenAI(
+        api_key=st.secrets["OPENAI_API_KEY"],
+        model="gpt-4o-mini", 
+        temperature=0.0  
+    )
+    
+    # ENGINE B: The CREATIVE Question Writer (For dynamic generation)
+    generator_llm = ChatOpenAI(
+        api_key=st.secrets["OPENAI_API_KEY"],
+        model="gpt-4o-mini", 
+        temperature=0.7  
+    )
+    
+    # Connect to the V12 local vector database
+    embeddings = OpenAIEmbeddings(api_key=st.secrets["OPENAI_API_KEY"])
+    db = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
+    
+    return evaluator_llm, generator_llm, db
+
+evaluator_llm, generator_llm, vector_db = load_engine()
+
+# --- 3. SESSION STATE MANAGEMENT ---
 if "initial_answer" not in st.session_state:
     st.session_state.initial_answer = None
 if "justification_provided" not in st.session_state:
@@ -13,129 +39,103 @@ if "justification_provided" not in st.session_state:
 if "current_question" not in st.session_state:
     st.session_state.current_question = None
 
-# --- 2. CLOUD-READY DUAL-ENGINE SETUP ---
-@st.cache_resource
-def load_database():
-    # CHANGED: Using OpenAI embeddings and pulling the key securely from st.secrets
-    embeddings = OpenAIEmbeddings(
-        api_key=st.secrets["OPENAI_API_KEY"], 
-        model="text-embedding-3-small"
-    )
-    db = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
-    return db
-
-vector_db = load_database()
-
-# Engine A: Creative (Locked to JSON output)
-# CHANGED: API key is now secured via st.secrets
-generator_llm = ChatOpenAI(
-    api_key=st.secrets["OPENAI_API_KEY"], 
-    model="gpt-4o-mini",
-    temperature=0.7,
-    model_kwargs={"response_format": {"type": "json_object"}}
-)
-
-# Engine B: Strict (For grading safely)
-# CHANGED: API key is now secured via st.secrets
-evaluator_llm = ChatOpenAI(
-    api_key=st.secrets["OPENAI_API_KEY"], 
-    model="gpt-4o-mini",
-    temperature=0.0 
-)
-
-# --- 3. TRUE REAL-TIME QUESTION GENERATOR ---
+# --- 4. THE API QUESTION GENERATOR ---
 def generate_new_question():
-    topics = ["Cardiology", "Neurology", "Gastroenterology", "Renal", "Endocrine", "Hematology", "Infectious Disease", "Pulmonology"]
-    chosen_topic = random.choice(topics)
+    prompt = """
+    You are an expert USMLE medical board examiner. 
+    Generate a brand new, challenging clinical vignette multiple-choice question.
     
-    docs = vector_db.similarity_search(f"USMLE high yield {chosen_topic}", k=3)
-    context = "\n".join([doc.page_content for doc in docs])
-    
-    prompt = f"""
-    You are an expert medical board exam writer. 
-    Read this textbook context: {context}
-    
-    Generate ONE multiple-choice clinical vignette question based strictly on this text.
-    Return ONLY a valid JSON object in this exact format:
-    {{
-        "text": "A [age]-year-old [gender] presents with...",
-        "options": ["A. [option]", "B. [option]", "C. [option]", "D. [option]"],
-        "answer": "B. [option]"
-    }}
+    You MUST output ONLY a valid JSON object with this exact structure. Do not include markdown formatting, code blocks, or any other text:
+    {
+        "clinical_presentation": "A 34-year-old male presents with...",
+        "options": ["A. Option 1", "B. Option 2", "C. Option 3", "D. Option 4"],
+        "correct_answer": "C. Option 3"
+    }
     """
-    
     response = generator_llm.invoke(prompt)
-    raw_text = response.content.strip().replace('```json', '').replace('```', '')
-    return json.loads(raw_text)
+    
+    # Clean the response to ensure perfect JSON parsing
+    clean_text = response.content.replace("```json", "").replace("```", "").strip()
+    return json.loads(clean_text)
 
-# Generate or load the current question
-if st.session_state.current_question is None:
-    with st.spinner("Generating a unique clinical scenario from your textbooks..."):
-        try:
-            st.session_state.current_question = generate_new_question()
-        except Exception as e:
-            st.error(f"Engine Misfire: {e}") 
-            st.warning("Click 'Next Question' to spin up a new scenario.")
-            st.stop()
-
-# Extract question details from memory
-question_data = st.session_state.current_question
-question_text = question_data["text"]
-options = question_data["options"]
-correct_answer = question_data["answer"]
-
-# --- 4. FRONTEND UI ---
+# --- 5. USER INTERFACE ---
 st.title("The Interrogation Engine")
 st.radio("Select Operating Mode:", ["Shift Mode", "Marathon Mode"], horizontal=True)
 st.markdown("---")
 
-st.write(f"**Clinical Presentation:** {question_text}")
+# Generate a new question if the memory bank is empty
+if st.session_state.current_question is None:
+    with st.spinner("Forging a new clinical vignette via API..."):
+        st.session_state.current_question = generate_new_question()
 
-# Handle selected answer UI state
-current_index = options.index(st.session_state.initial_answer) if st.session_state.initial_answer in options else None
-selected_answer = st.radio("Select best action:", options, index=current_index)
+# Extract the current question data
+clinical_presentation = st.session_state.current_question["clinical_presentation"]
+options = st.session_state.current_question["options"]
 
-# --- 5. STRICT EVALUATION ---
-if selected_answer and st.session_state.initial_answer is None:
-    st.session_state.initial_answer = selected_answer
-    st.rerun()
+st.markdown(f"**Clinical Presentation:** {clinical_presentation}")
+user_choice = st.radio("Select best action:", options, index=None)
 
+# Lock in the answer when selected
+if user_choice and st.session_state.initial_answer != user_choice:
+    st.session_state.initial_answer = user_choice
+    st.session_state.justification_provided = False
+
+# --- 6. THE EVALUATION LOGIC ---
 if st.session_state.initial_answer:
     st.success(f"Answer '{st.session_state.initial_answer}' locked in. Processing strict evaluation...")
     
     if not st.session_state.justification_provided:
         with st.spinner("Consulting vector database & verifying facts..."):
             
-            user_answer = st.session_state.initial_answer
-            docs = vector_db.similarity_search(question_text, k=6)
-            medical_context = "\n".join([doc.page_content for doc in docs])
+            # Retrieve the medical facts from the 229MB database
+            search_results = vector_db.similarity_search(clinical_presentation, k=3)
+            context = "\n\n".join([doc.page_content for doc in search_results])
             
+            # BULLETPROOF PYTHON GRADING (Bypassing AI logic)
+            user_ans = st.session_state.initial_answer.strip()
+            correct_ans = st.session_state.current_question["correct_answer"].strip()
+            
+            # Checking the exact string (or at least the first letter, e.g., 'A' vs 'A')
+            if user_ans[0] == correct_ans[0]:
+                grade_header = "✅ Correct!"
+            else:
+                grade_header = f"❌ Incorrect. The correct answer is {correct_ans}."
+            
+            # THE SOCRATIC PROMPT (Titanium Guardrails Installed)
             prompt = f"""
-            You are a strict, clinical USMLE tutor.
+            You are an expert medical board examiner tutoring a student. 
             
-            Clinical Case: {question_text}
-            Student's Chosen Answer: {user_answer}
-            The Actual Correct Answer is: {correct_answer}
+            The student was given a clinical vignette. 
+            They selected: '{user_ans}'.
+            The actual correct answer is: '{correct_ans}'.
+            
+            Using ONLY the retrieved medical textbook context below, provide a Socratic explanation of WHY the correct answer is right, and why the student's choice (if they were wrong) is incorrect.
+            
+            Retrieved Textbook Context:
+            {context} 
 
-            Medical Textbook Context: 
-            {medical_context}
-
-            CRITICAL SAFETY INSTRUCTIONS:
-            1. You must explain the correct answer using ONLY the facts present in the Medical Textbook Context above.
-            2. If the student is INCORRECT, explicitly state: "Incorrect. The correct answer is {correct_answer}."
-            3. If the provided context does not explicitly verify the mechanism of action or clinical link for these options, say EXACTLY: "I can confirm the correct answer is {correct_answer}, but my local medical database context is missing the specific text required to fully explain this mechanism."
-            4. DO NOT extrapolate, speculate, or bring in outside medical assumptions not written in the context.
+            CRITICAL GUARDRAILS:
+            1. You must base your reasoning EXCLUSIVELY on the textbook context provided above.
+            2. DO NOT use outside knowledge, extrapolate, deduce, or guess.
+            3. Do not re-state whether the student is correct or incorrect, just provide the medical reasoning.
+            4. If the retrieved context does not explicitly contain the clinical mechanics to explain the answer, you must strictly reply with: 'I cannot evaluate this. The retrieved context does not contain the necessary information.' Do not attempt to answer it yourself.
             """
             
+            # Fire the zero-temperature engine
             actual_response = evaluator_llm.invoke(prompt)
+            
+            # Display the hardcoded grade AND the AI's strictly-bounded reasoning
+            st.markdown(f"### {grade_header}")
             st.info(f"**Socratic Evaluation:**\n\n{actual_response.content}")
+            
             st.session_state.justification_provided = True
 
 st.markdown("---")
 
-# --- 6. SYSTEM RESET ---
+# --- 7. SYSTEM RESET ---
 if st.button("Next Question"):
+    # Wiping the memory forces the app to generate a fresh question from the API at the top
+    st.session_state.current_question = None 
     st.session_state.initial_answer = None
     st.session_state.justification_provided = False
-    st.session_state.current_question = None 
     st.rerun()
