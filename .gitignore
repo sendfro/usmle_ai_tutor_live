@@ -1,0 +1,6 @@
+/.DS_Store
+/.streamlit
+/Miniconda3-latest-MacOSX-arm64.sh
+/data
+/ingest.py
+/medical_chroma_db
